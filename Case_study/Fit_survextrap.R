@@ -34,7 +34,7 @@ external_data_aggregate <- readRDS("Data/external_data_no_overlap.rds")
 ######################################################
 #  Specify scenarios.
 ######################################################
-#?survextrap()
+##?survextrap()
 
 base_scenarios <- expand_grid(
   model = c("PH", "NON-PH", "Separate_arms"),
@@ -42,7 +42,7 @@ base_scenarios <- expand_grid(
   mutate(
     df = 3,
     hsd_rate = 5,
-    hrsd_rate = if_else(model == "NON-PH", 1, NA)) %>%
+    hrsd_rate = if_else(model == "NON-PH", 5, NA)) %>%
   mutate(
     store_file = paste0(store_wd, "base_model_", row_number(), ".rds"),
     hazard_survival_file = paste0(store_wd, "base_model_", row_number(), "_hs.rds"),
@@ -54,7 +54,7 @@ knots_sensitivity <- expand_grid(
   df = c(3,6,10)) %>%
   mutate(
     hsd_rate = 5,
-    hrsd_rate = if_else(model == "NON-PH", 1, NA)) %>%
+    hrsd_rate = if_else(model == "NON-PH", 5, NA)) %>%
   mutate(
     store_file = paste0(store_wd, "knots_model_", row_number(), ".rds"),
     hazard_survival_file = paste0(store_wd, "knots_model_", row_number(), "_hs.rds"),
@@ -161,4 +161,418 @@ pmap(knots_sensitivity %>%
 # View(test)
 # View(test2)
 
+
+######################################################
+#  Plot results.
+######################################################
+
+# read in results from base scenarios.
+
+base_scenarios
+
+for(i in 1:nrow(base_scenarios)){
+
+  temp_hs <- readRDS(base_scenarios$hazard_survival_file[i]) %>%
+    mutate(store_file = base_scenarios$store_file[i])
+  
+  temp_rmst <- readRDS(base_scenarios$rmst_file[i])  %>%
+    mutate(store_file = base_scenarios$store_file[i])
+  
+  if(i == 1){
+    
+    base_results <- bind_rows(temp_hs, temp_rmst) 
+    
+  } else {
+    
+    base_results <-  base_results %>%
+      bind_rows(temp_hs, temp_rmst) 
+    
+    
+  }
+}
+  
+
+base_results <- base_results %>%
+  left_join(base_scenarios, by = "store_file")
+
+############################################################
+# Survival/hazard plot figure.
+############################################################
+
+km_data_all <- readRDS("Data/km_data_all.rds")
+
+get_legend_35 <- function(plot, legend_number = 1) {
+  # find all legend candidates
+  legends <- get_plot_component(plot, "guide-box", return_all = TRUE)
+  # find non-zero legends
+  idx <- which(vapply(legends, \(x) !inherits(x, "zeroGrob"), TRUE))
+  # return either the chosen or the first non-zero legend if it exists,
+  # and otherwise the first element (which will be a zeroGrob) 
+  if (length(idx) >= legend_number) {
+    return(legends[[idx[legend_number]]])
+  } else if (length(idx) >= 0) {
+    return(legends[[idx[1]]])
+  } else {
+    return(legends[[1]])
+  }
+}
+
+  figure3_a <- base_results  %>%
+  filter(variable == "survival") %>%
+  filter(model == "NON-PH") %>%
+  filter(t > 0) %>%
+  mutate(datasets = factor(datasets, 
+                        levels = c("trial_only", 
+                                   "trial_and_historic",
+                                   "trial_and_all"
+                        ),
+                        labels = c("ALEX trial data only", 
+                                   "ALEX + PROFILE-1014",
+                                   "ALEX + PROFILE-1014 + Flatiron RWE"
+                        ))) %>%  
+  ggplot()+
+  theme_classic()+
+  theme(legend.position = "bottom",
+        legend.title = element_text(margin = margin(l = unit(4.0, 'cm'), r = unit(12.0, 'cm'))),
+        legend.key.spacing.x =  unit(0.3, 'cm'),
+        legend.box.spacing = unit(0, "inch"),
+        plot.margin = unit(c(0.1,0,0,0), "cm"),
+        legend.spacing = unit(c(0,0,0,0), "cm"),
+        legend.spacing.x = unit(0, "mm"),
+        legend.spacing.y = unit(0, "mm"))+
+  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
+              alpha = 0.25, colour =  NA)+
+  geom_line(aes(x = t, y = median, colour = trt))+
+  geom_line(data = km_data_all %>% 
+               filter(dataset == "ALEX trial") %>% 
+               select(-c(dataset,model)),
+             aes(x = time, y = surv, colour = trt) )+
+  scale_colour_discrete("Treatment")+
+  scale_fill_discrete("Treatment")+
+  scale_y_continuous(limits = c(0,1),labels = scales::percent)+
+  ylab("Overall Survival")+
+  xlab("Time (years)")+
+  facet_wrap(~datasets, ncol = 1)
+
+figure3_a
+
+figure3_b <- base_results  %>%
+  filter(variable == "hazard") %>%
+  filter(model == "NON-PH") %>%
+  filter(t > 0) %>%
+  mutate(datasets = factor(datasets, 
+                           levels = c("trial_only", 
+                                      "trial_and_historic",
+                                      "trial_and_all"
+                           ),
+                           labels = c("ALEX trial data only", 
+                                      "ALEX + PROFILE-1014",
+                                      "ALEX + PROFILE-1014 + Flatiron RWE"
+                           ))) %>%  
+  filter(t > 0) %>%
+  ggplot()+
+  theme_classic()+
+  theme(legend.box = "horizontal",
+        legend.box.spacing = unit(0, "inch"),
+        legend.title = element_text(margin = margin(b = 0.1)),
+        plot.margin = unit(c(0.1,0,0,0), "cm"),
+        legend.spacing = unit(c(0,0,0,0), "cm"),
+        legend.spacing.x = unit(0, "mm"),
+        legend.spacing.y = unit(0, "mm"))+
+  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
+              alpha = 0.25, colour =  NA)+
+  geom_line(aes(x = t, y = median, colour = trt))+
+  scale_colour_discrete("Treatment")+
+  scale_fill_discrete("Treatment")+
+  scale_y_continuous("Hazard", limits = c(0, 0.4))+
+  xlab("Time (years)")+
+  facet_wrap(~datasets, ncol = 1)
+
+figure3_b
+
+plot_legend <- get_legend_35(figure3_a)
+
+plot_figure_3_no_legend <- plot_grid(
+  figure3_a +
+    theme(legend.position="none",
+          plot.title = element_text(hjust = -0.1,
+                                    vjust = -0.02,
+                                    size=14, face="bold"))+
+    labs(title = "(a)"),
+  NULL,
+  figure3_b+
+    theme(legend.position="none",
+          plot.title = element_text(hjust = -0.1,
+                                    vjust = -0.02,
+                                    size=14, face="bold"))+
+    labs(title = "(b)"), 
+  rel_widths = c(0.51,0.01, 0.5),
+  ncol = 3)
+
+plot_figure_3 <- plot_grid(plot_figure_3_no_legend,
+                           NULL,
+                           plot_legend, 
+                           rel_heights = c(0.9,-0.01, 0.1),
+                           ncol = 1)
+
+plot_figure_3
+
+
+############################################################
+# Forest plot figure.
+############################################################
+
+# base_results %>%
+#   filter(variable == "rmst") %>%
+#  # filter(trt == "Crizotinib") %>%
+#   filter(t > 0) %>%
+#   mutate(datasets = factor(datasets, 
+#                            levels = c("trial_only", 
+#                                       "trial_and_historic",
+#                                       "trial_and_all"
+#                            ),
+#                            labels = c("ALEX trial data only", 
+#                                       "ALEX + PROFILE-1014",
+#                                       "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+#   mutate(model = factor(model, 
+#                            levels = c("PH", 
+#                                       "NON-PH",
+#                                       "Separate_arms"
+#                            ),
+#                            labels = c("PH", 
+#                                       "Non-PH",
+#                                       "Separate arms"))) %>%  
+#   filter(t == 5) %>%
+#   #group_by(trt) %>%
+#   mutate(group_id = -row_number()+0.5*(trt == "Crizotinib")) %>%
+#   # mutate(index = paste0("group", row_number())) %>%
+#   ggplot()+
+#   theme_classic()+
+#   geom_point(aes( x = median, y=group_id, colour = model, shape = datasets, fill = trt))+
+#   geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = model))
+
+for(i in c(1,2)){
+  
+  # plot_label <- c("(a)", "(b)")[i]
+  time_point <- c(5,20)[i]
+  
+  low_x_axis <- base_results %>%
+    filter(variable == "rmst") %>%
+    filter(t == time_point) %>%
+    pull(lower) %>%
+    min() - 0.1
+  
+  high_x_axis <- base_results %>%
+    filter(variable == "rmst") %>%
+    filter(t == time_point) %>%
+    pull(upper) %>%
+    max() + 0.1
+  
+  control_forest <- base_results %>%
+    filter(variable == "rmst") %>%
+    filter(trt == "Crizotinib") %>%
+    filter(t > 0) %>%
+    mutate(datasets = factor(datasets, 
+                             levels = c("trial_only", 
+                                        "trial_and_historic",
+                                        "trial_and_all"
+                             ),
+                             labels = c("ALEX trial data only", 
+                                        "ALEX + PROFILE-1014",
+                                        "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+    mutate(model = factor(model, 
+                          levels = c("PH", 
+                                     "NON-PH",
+                                     "Separate_arms"
+                          ),
+                          labels = c("PH", 
+                                     "Non-PH",
+                                     "Separate arms"))) %>%  
+    filter(t == time_point) %>%
+    #group_by(trt) %>%
+    mutate(group_id = -row_number()) %>%
+    # mutate(index = paste0("group", row_number())) %>%
+    ggplot()+
+    theme_classic()+
+    theme(panel.grid = element_blank(),
+          panel.border = element_blank(),
+          axis.line.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(),
+          axis.title.y=element_blank(),
+         axis.text.x = element_text( size = 8), #, angle = 45, vjust = 0.5, hjust=0.5),
+         axis.title.x = element_text( face="bold",size = 10),
+          legend.background = element_blank(),
+          legend.box.background = element_rect(colour = "black"),
+          legend.key.spacing.y = unit(3, "pt"),
+          legend.text = element_text(size=8)) + 
+    geom_point(aes( x = median, y=group_id, colour = model, shape = datasets),
+               alpha = 1,
+               stroke = 1,
+               size = 2)+
+    geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = model))+
+    scale_x_continuous( paste0("RMST at ", time_point, "-years\n", "for Crizotinib"),
+                        limits = c(low_x_axis, high_x_axis))+
+    scale_shape_discrete("Datasets")+
+    scale_colour_discrete("Model")+
+    guides(                              
+      shape = guide_legend(override.aes=list(colour = "gray60",
+                                             fill = "gray60")))
+  
+  active_forest <- base_results %>%
+    filter(variable == "rmst") %>%
+    filter(trt == "Alectinib") %>%
+    filter(t > 0) %>%
+    mutate(datasets = factor(datasets, 
+                             levels = c("trial_only", 
+                                        "trial_and_historic",
+                                        "trial_and_all"
+                             ),
+                             labels = c("ALEX trial data only", 
+                                        "ALEX + PROFILE-1014",
+                                        "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+    mutate(model = factor(model, 
+                          levels = c("PH", 
+                                     "NON-PH",
+                                     "Separate_arms"
+                          ),
+                          labels = c("PH", 
+                                     "Non-PH",
+                                     "Separate arms"))) %>%  
+    filter(t == time_point) %>%
+    #group_by(trt) %>%
+    mutate(group_id = -row_number()) %>%
+    # mutate(index = paste0("group", row_number())) %>%
+    ggplot()+
+    theme_classic()+
+    theme(panel.grid = element_blank(),
+          panel.border = element_blank(),
+          axis.line.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(),
+          axis.title.y=element_blank(),
+          axis.text.x = element_text( size = 8), #, angle = 45, vjust = 0.5, hjust=0.5),
+          axis.title.x = element_text( face="bold",size = 10),
+          legend.background = element_blank(),
+          legend.box.background = element_rect(colour = "black"),
+          legend.key.spacing.y = unit(3, "pt"),
+          legend.text = element_text(size=8)) + 
+    geom_point(aes( x = median, y=group_id, colour = model, shape = datasets),
+               alpha = 1,
+               stroke = 1,
+               size = 2)+
+    geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = model))+
+    scale_x_continuous( paste0("RMST at ", time_point, "-years\n", "for Alectinib"),
+                        limits = c(low_x_axis, high_x_axis))+
+    scale_shape_discrete("Datasets")+
+    scale_colour_discrete("Model")+
+    guides(                              
+      shape = guide_legend(override.aes=list(colour = "gray60",
+                                             fill = "gray60")))
+  
+  difference_forest <- base_results %>%
+    filter(variable == "irmst") %>%
+    filter(t > 0) %>%
+    mutate(datasets = factor(datasets, 
+                             levels = c("trial_only", 
+                                        "trial_and_historic",
+                                        "trial_and_all"
+                             ),
+                             labels = c("ALEX trial data only", 
+                                        "ALEX + PROFILE-1014",
+                                        "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+    mutate(model = factor(model, 
+                          levels = c("PH", 
+                                     "NON-PH",
+                                     "Separate_arms"
+                          ),
+                          labels = c("PH", 
+                                     "Non-PH",
+                                     "Separate arms"))) %>%  
+    filter(t == time_point) %>%
+    #group_by(trt) %>%
+    mutate(group_id = -row_number()) %>%
+    # mutate(index = paste0("group", row_number())) %>%
+    ggplot()+
+    theme_classic()+
+    theme(panel.grid = element_blank(),
+          panel.border = element_blank(),
+          axis.line.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(),
+          axis.title.y=element_blank(),
+          axis.text.x = element_text( size = 8), #, angle = 45, vjust = 0.5, hjust=0.5),
+          axis.title.x = element_text( face="bold",size = 10),
+          legend.background = element_blank(),
+          legend.box.background = element_rect(colour = "black"),
+          legend.key.spacing.y = unit(3, "pt"),
+          legend.text = element_text(size=8)) + 
+    geom_point(aes( x = median, y=group_id, colour = model, shape = datasets),
+               alpha = 1,
+               stroke = 1,
+               size = 2)+
+    geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = model))+
+    geom_vline(xintercept = 0,
+               colour = "gray50",
+               alpha = 0.7)+
+    scale_x_continuous( paste0("Difference in \n RMST at ", time_point, "-years\n") )+
+    scale_shape_discrete("Datasets")+
+    scale_colour_discrete("Model")+
+    guides(                              
+      shape = guide_legend(override.aes=list(colour = "gray60",
+                                             fill = "gray60")))
+  
+  
+  forest_legend <- cowplot::get_legend(
+    # create some space to the left of the legend
+    active_forest + theme(legend.box.margin = margin(0, 12, 0, 0))
+  )
+
+  forest_plots <- plot_grid(control_forest+
+                              theme(legend.position="none",
+                                    plot.title = element_text(size=10, face="bold")),#+
+                          #    labs(title = plot_label),
+                            active_forest+
+                              theme(legend.position="none",
+                                    plot.title = element_text(size=10, face="bold")),#+
+                       #       labs(title = " "),
+                            difference_forest+
+                              theme(legend.position="none",
+                                    plot.title = element_text(size=10, face="bold")),#+
+                            #  labs(title = " "),
+                            align = "h",
+                            rel_widths=c(1,1,1),
+                            nrow = 1)
+  print(i)
+  
+  assign(paste0("forest",i), forest_plots)
+}
+
+# forest
+# forest1
+# forest2
+# 
+# plot_grid(forest_plots,
+#           forest_legend,
+#           rel_widths=c(1, 0.6),
+#           axis = "l"
+# )
+
+plot_all <- ggdraw(
+  plot_grid(plot_grid(NULL,forest1, NULL, forest2, rel_heights = c(0.06, 0.5, 0.06, 0.5),  
+                      labels = c("(a)", "", "(b)", ""),
+                      label_size = 12,
+                      label_x = 0, ncol = 1,align = "v"),
+            plot_grid(NULL, plot_grid(forest_legend , NULL, ncol = 1, rel_heights = c(1, 100)), ncol=1),
+            rel_widths=c(1, 0.65)))
+
+
+tiff(file = "Figures/Figure_4.tiff",   
+     width = 7, 
+     height = 6.5,
+     units = 'in',  
+     res = 300, 
+     compression = "lzw")
+print(plot_all)
+dev.off()
 

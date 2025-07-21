@@ -34,6 +34,7 @@ source("Functions/Hybrid_model.R")
 ######################################################
 #  Derive Flatiron cohort for Crizotinib
 ######################################################
+
 # 262 - 39 ALK confirmed negative, 206 ALK confirmed positive. 17 unknown.
 # Filter down to 206 ALK confirmed positive.
 
@@ -943,6 +944,7 @@ km_data_all <- km_rwd_plot_unweighted %>%
 # filter(dataset == "ALEX") %>%
 #  mutate(dataset = "ALEX trial")
 
+saveRDS(km_data_all, "Data/km_data_all.rds")
 
 figure3_a <- surv_mod1 %>%
   bind_rows(surv_mod2) %>%
