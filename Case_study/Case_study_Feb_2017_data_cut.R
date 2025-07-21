@@ -548,7 +548,7 @@ saveRDS(external_data_no_overlap, "Data/external_data_no_overlap.rds")
 #############################################################
 
 model_trial_data <- survextrap(Surv(time,status) ~ trt, 
-                       data = trial_data , 
+                       data = trial_data, 
                        # backhaz = cetux_bh,
                       #  nonprop = T,
                         df = 3 ,
