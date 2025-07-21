@@ -2,3 +2,10 @@
 .Rhistory
 .RData
 .Ruserdata
+
+_rslurm*/
+Data
+Figures
+Flatiron_data
+
+
