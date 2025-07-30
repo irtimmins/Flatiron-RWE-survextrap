@@ -53,9 +53,9 @@ create_flatiron_data <- function(treatment = NULL,
     ) |>
     rwdcohort::include_custom("is_stage_iiib_or_iv", "Diagnosed with stage IIIB or IV") |>
     rwdcohort::include_custom("is_alk_positive", "ALK Positive") |>
+    rwdcohort::include_custom("is_alex_regimen", "ALEX Regimen") |>
     rwdcohort::include_custom("tx_start_after_2011", "1L start after 2011-08-26") |>
     rwdcohort::include_custom("os1_is_known", "Overall survival known") |>
-    rwdcohort::include_custom("is_alex_regimen", "ALEX Regimen") |>
     rwdcohort::include_custom("ecog_0_1_2", "ECOG 0, 1 or 2") |>
     rwdcohort::include_custom("key_covariates_known", "Key covariates known") 
 

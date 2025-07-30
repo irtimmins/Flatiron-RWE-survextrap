@@ -17,21 +17,46 @@ survextrap_mem <- memoise(survextrap,
 # Fit survextrap models to two arms.
 ##################################################
 
-fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, store_file){
+fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_method, store_file){
   
-  #  print(df)
+
+  # Specify external dataset.
+  
+  add_knots <- get(add_knots)
+  
   
   if(datasets == "trial_only") external_data <- NULL
   if(datasets == "trial_and_historic") external_data <- historic_trial_aggregate
   if(datasets == "trial_and_all") external_data <- external_data_aggregate
+  
+  # Specify M-spline, and add extra knots for external data.
+  
+  if(datasets == "trial_only"){
+    
+    mspline <-  mspline_spec(Surv(time,status) ~ trt, 
+                             data = trial_data, 
+                             df=df)
+    
+  } else if (datasets %in% c("trial_and_historic", "trial_and_all")) {
+
+    mspline <-  mspline_spec(Surv(time,status) ~ trt, 
+                             data = trial_data,
+                             df=df,
+                             add_knots = add_knots)
+        
+  }
+
+  # Fit models.
+  
   
   if(model == "PH"){
     
     results <- survextrap_mem(Surv(time,status) ~ trt, 
                               data = trial_data , 
                               external = external_data,
-                              mspline = list("df"=df),
-                              prior_hsd = p_gamma(2, hsd_rate))
+                              mspline = mspline,
+                              prior_hsd = p_gamma(2, hsd_rate),
+                              fit_method = fit_method)
     
     
   } else if(model == "NON-PH"){
@@ -40,23 +65,26 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, store_file){
                               data = trial_data , 
                               nonprop = T,
                               external = external_data,
-                              mspline = list("df"=df),
+                              mspline = mspline,
                               prior_hsd = p_gamma(2, hsd_rate),
-                              prior_hrsd = p_gamma(2, hrsd_rate))
+                              prior_hrsd = p_gamma(2, hrsd_rate),
+                              fit_method = fit_method)
     
   }else if(model == "Separate_arms"){
     
     results_control <- survextrap_mem(Surv(time,status) ~ 1, 
                                       data = trial_data %>% filter(trt == "Crizotinib") , 
                                       external = external_data,
-                                      mspline = list("df"=df),
-                                      prior_hsd = p_gamma(2, hsd_rate))
+                                      mspline = mspline,
+                                      prior_hsd = p_gamma(2, hsd_rate),
+                                      fit_method = fit_method)
     
     
     results_active <- survextrap_mem(Surv(time,status) ~ 1, 
                                      data = trial_data %>% filter(trt == "Alectinib") , 
                                      mspline = list("df"=df),
-                                     prior_hsd = p_gamma(2, hsd_rate))
+                                     prior_hsd = p_gamma(2, hsd_rate),
+                                     fit_method = fit_method)
     
     results <- list(control = results_control, active = results_active)
     class(results) <- "two_models"
@@ -198,3 +226,46 @@ get_rmst_survextrap <- function(model_file, store_file){
 }
 
 
+##################################################
+# further helper functions.
+##################################################
+
+
+get_legend_35 <- function(plot, legend_number = 1) {
+  # find all legend candidates
+  legends <- get_plot_component(plot, "guide-box", return_all = TRUE)
+  # find non-zero legends
+  idx <- which(vapply(legends, \(x) !inherits(x, "zeroGrob"), TRUE))
+  # return either the chosen or the first non-zero legend if it exists,
+  # and otherwise the first element (which will be a zeroGrob) 
+  if (length(idx) >= legend_number) {
+    return(legends[[idx[legend_number]]])
+  } else if (length(idx) >= 0) {
+    return(legends[[idx[1]]])
+  } else {
+    return(legends[[1]])
+  }
+}
+
+filter_model <- function(.data, model = "PH", df_value = 3, hrsd_rate_value = NULL ){
+  
+  if(model == "PH"){
+    
+    .data %>%
+      filter(model == "PH") %>%
+      filter(df == df_value)
+    
+  } else if(model == "NON-PH"){
+    
+    .data %>%
+      filter(model == "NON-PH") %>%
+      filter(hrsd_rate == hrsd_rate_value, df == df_value) 
+    
+  } else if(model == "Separate_arms"){
+    
+    .data %>%
+      filter(model == "Separate_arms") %>%
+      filter(df == df_value)
+    
+  }
+}

@@ -6,6 +6,8 @@ library(cobalt)
 library(spatstat)
 library(readr)
 
+source("Functions/Build_Flatiron_cohort.R")
+
 #######################################################################
 # RWD data.
 #######################################################################
@@ -19,7 +21,7 @@ rwd_data <- create_flatiron_data(treatment = "Crizotinib",
 
 summary(as.factor(rwd_data$smoking_status))
 summary(as.factor(rwd_data$histology))
-View(rwd_data)
+#View(rwd_data)
 #summary(as.factor(rwd_data))
 
 ALEX_table1 <-
@@ -67,16 +69,19 @@ rwd_data_weighted <- create_weighted_cohort(
          brain_mets_yes = 1*brain_mets,
          brain_mets_no = 1*(!brain_mets))
 
-table1 <- tibble(variable = c("age_median", "age_range",
+table1 <- tibble(variable = c("age_mean", 
+                              "age_median",
+                              "age_range",
                     "sex_male", "sex_female",
                     "race_asian", "race_non_asian",
                     "smoking_ever", "smoking_never",
                     "ecog_0_or_1", "ecog_2",
                     "disease_local", "disease_meta",
                     "brain_mets_yes", "brain_mets_no")) %>%
-  mutate(type = c("cts", "cts_range",
+  mutate(type = c("cts_mean", "cts_median", "cts_range",
                   rep("binary",12))) %>%
-  mutate(flatiron_column = c("age_at_lot_1_startdate", 
+  mutate(flatiron_column = c("age_at_lot_1_startdate",
+                             "age_at_lot_1_startdate", 
                              "age_at_lot_1_startdate",
                              "sex_male",
                              "sex_female",
@@ -94,6 +99,7 @@ table1 <- tibble(variable = c("age_median", "age_range",
         weight_value = 0)
 
 for(i in 1:nrow(table1)){
+  
   if(table1$type[i] == "binary"){
 
     variable_temp <- table1$flatiron_column[i]
@@ -113,7 +119,20 @@ for(i in 1:nrow(table1)){
     table1$weight_value[i] <- paste0(n_weight_temp, " (", perc_weight_temp, "%)")
     
     
-  } else if(table1$type[i] == "cts"){
+  } else if(table1$type[i] == "cts_mean"){
+    
+    variable_temp <- table1$flatiron_column[i]
+    
+    temp_data <-  rwd_data_weighted[c(variable_temp,"weight")] 
+    names(temp_data) <- c("variable", "weight")
+    
+    mean_temp <- sum(temp_data$variable)/nrow(temp_data)
+    mean_weight_temp <- sum(temp_data$variable*temp_data$weight)/sum(temp_data$weight)
+    
+    table1$unweight_value[i] <- round(mean_temp, digits = 1)
+    table1$weight_value[i] <-  round(mean_weight_temp, digits = 1)
+    
+  } else if(table1$type[i] == "cts_median"){
       
     variable_temp <- table1$flatiron_column[i]
     
@@ -126,8 +145,8 @@ for(i in 1:nrow(table1)){
     table1$unweight_value[i] <- median_temp
     table1$weight_value[i] <- median_weight_temp
     
-    }else if(table1$type[i] == "cts_range"){
-      i <- 2
+    } else if(table1$type[i] == "cts_range"){
+
       variable_temp <- table1$flatiron_column[i]
       
       temp_data <-  rwd_data_weighted[c(variable_temp,"weight")] 
@@ -144,6 +163,6 @@ for(i in 1:nrow(table1)){
     
       
 }
+table1
 
-
-write_csv(table1, "Flatiron_data/Table1_rwe.csv")
+write_csv(table1, "Tables/Table1_rwe.csv")
