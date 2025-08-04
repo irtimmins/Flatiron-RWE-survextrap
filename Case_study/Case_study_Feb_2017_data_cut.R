@@ -21,6 +21,8 @@ library(ggh4x)
 library(condsurv)
 library(cowplot)
 library(flexsurv)
+library(utile.visuals)
+
 
 ######################################################
 #  Derive Flatiron cohort for Crizotinib
@@ -101,7 +103,7 @@ historic_trial_data <- readRDS("Data/trial_IPD_OS_PROFILE_1014_Nov_2016.rds")
 
 km_trial_data  <- survfit(Surv(time, status) ~ trt, data=trial_data)
 km_trial_plot <- ggsurvplot(km_trial_data, data=trial_data)["data.survplot"] [[1]] %>%
-  select(time, surv, trt) %>%
+  select(time, surv, lower, upper, trt) %>%
   mutate(dataset = "ALEX") %>%
   as_tibble() %>%
   add_row(time = 0, surv = 1, trt = "Alectinib", dataset = "ALEX") %>%
@@ -111,37 +113,42 @@ km_trial_plot <- ggsurvplot(km_trial_data, data=trial_data)["data.survplot"] [[1
 km_historic_trial_data  <- survfit(Surv(time, status) ~ 1, data=historic_trial_data)
 km_historic_trial_plot <- ggsurvplot(km_historic_trial_data, data=historic_trial_data)["data.survplot"][[1]] %>%
   mutate(trt = "Crizotinib",
-         dataset = "PROFILE-1014") %>%
-  select(time, surv, trt, dataset) %>%
+         dataset = "PROFILE-1014")  %>%
+  select(time, surv, lower, upper, trt, dataset) %>%
   as_tibble()
 
 km_rwd_data_weighted <- survfit(Surv(time, status) ~ 1, data=rwd_data_weighted, 
                                weights = rwd_data_weighted$weight)
 km_rwd_plot <- ggsurvplot(km_rwd_data_weighted, data=rwd_data_weighted)["data.survplot"][[1]] %>%
+  as_tibble() %>%
   mutate(trt = "Crizotinib",
          dataset = "Flatiron RWE MAIC Weighted") %>%
-  select(time, surv, trt, dataset)
+  select(time, surv, lower, upper, trt, dataset)
 
 km_rwd_data_unweighted <- survfit(Surv(time, status) ~ 1, data=rwd_data_unweighted)
 km_rwd_plot_unweighted <- ggsurvplot(km_rwd_data_unweighted, data=rwd_data_unweighted)["data.survplot"][[1]] %>%
   mutate(trt = "Crizotinib",
-         dataset = "Flatiron RWE Unweighted") %>%
-  select(time, surv, trt, dataset)
+         dataset = "Flatiron RWE Unweighted")  %>%
+  select(time, surv, lower, upper, trt, dataset)
 
 km_all <- bind_rows(km_trial_plot,
                     km_historic_trial_plot,
                     km_rwd_plot,
                     km_rwd_plot_unweighted)
 
+km_all
+
 plot0 <- km_all %>%
   mutate(dataset = factor(dataset, 
                           levels = c("ALEX", "PROFILE-1014", 
                                      "Flatiron RWE MAIC Weighted", "Flatiron RWE Unweighted"))) %>%
   filter(dataset == "ALEX") %>%
-  ggplot(aes(x = time, y = surv, colour = trt))+
+  ggplot(aes(x = time, y = surv, colour = trt, fill = trt))+
   theme_classic()+
   geom_step(linewidth = 0.8)+
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, colour = NA )+
   scale_colour_discrete("Treatment")+
+  scale_fill_discrete("Treatment")+
   scale_y_continuous("Overall Survival", 
                      limits = c(0,1), labels = scales::percent)+
   scale_x_continuous("Time (years)") + ##, limits = c(0,6))
@@ -153,11 +160,12 @@ plot1 <- km_all %>%
   mutate(dataset = factor(dataset, 
                           levels = c("ALEX", "PROFILE-1014", 
                                      "Flatiron RWE MAIC Weighted", "Flatiron RWE Unweighted"))) %>%
-  ggplot(aes(x = time, y = surv, colour = dataset , linetype = trt))+
+  ggplot(aes(x = time, y = surv, colour = dataset , fill = dataset, linetype = trt))+
   theme_classic()+
   geom_step(linewidth = 0.8)+
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, colour = NA )+
   scale_colour_discrete("Dataset")+
-  scale_linetype_discrete("Treatment")+
+  scale_linetype_discrete("Dataset")+
   scale_y_continuous("Overall Survival", 
                      limits = c(0,1), labels = scales::percent)+
   scale_x_continuous("Time (years)") + ##, limits = c(0,6))
@@ -205,20 +213,27 @@ plot3
 
 plot_2a <- km_all %>%
   mutate(dataset = factor(dataset, 
-                          levels = c("ALEX", "PROFILE-1014", 
-                                     "Flatiron RWE MAIC Weighted", "Flatiron RWE Unweighted"))) %>%
+                          levels = c("ALEX", 
+                                     "PROFILE-1014", 
+                                     "Flatiron RWE MAIC Weighted", 
+                                     "Flatiron RWE Unweighted"))) %>%
   filter(dataset == "ALEX") %>%
-  ggplot(aes(x = time, y = surv, colour = trt))+
+  mutate(trt = paste0("ALEX, ", trt)) %>%
+  ggplot(aes(x = time, y = surv, colour = trt, fill = trt))+
   theme_classic()+
-  theme(legend.position.inside = c(0.66,0.93),
-        legend.position = "inside",
+  theme(#
+    legend.position.inside = c(0.2,0.35),
+        legend.position = "right",
         legend.text=element_text(size=9),
-        legend.key.spacing.y = unit(-8, "pt"),
-        legend.box.spacing = unit(-10, "pt"),
-        legend.title = element_text(size=12,
-                                    margin = margin(l = 0, r = 0, b = 0, t = 0))) +
+        legend.key.spacing.y = unit(4, "pt"),
+        legend.box.spacing = unit(0, "pt"),
+       # legend.title = element_text(size=12,
+        #                            margin = margin(l = 0, r = 0, b = 0, t = 0))
+    ) +
   geom_step(linewidth = 0.8)+
-  scale_colour_manual("Treatment", values = c("#4393c3","#d6604d"))+
+  geom_stepconfint(aes(ymin = lower, ymax = upper), alpha = 0.17, colour = NA )+
+  scale_colour_manual("Data, Treatment", values = c("#4393c3","#d6604d"))+
+  scale_fill_manual("Data, Treatment", values = c("#4393c3","#d6604d"))+
   scale_y_continuous("Overall Survival", 
                      limits = c(0,1), labels = scales::percent)+
   scale_x_continuous("Time (years)",breaks = 0:5, limits = c(0,3))
@@ -233,25 +248,30 @@ plot_2b <- km_all %>%
                                      "PROFILE-1014", 
                                      "Flatiron RWE MAIC Weighted", 
                                      "Flatiron RWE Unweighted"),
-                          labels = c("ALEX", 
-                                     "PROFILE-1014", 
-                                     "Flatiron RWE MAIC weighted", 
-                                     "Flatiron RWE unweighted"))) %>%
+                          labels = c("ALEX, Crizotinib", 
+                                     "PROFILE-1014, Crizotinib", 
+                                     "Flatiron RWE \nMAIC weighted, Crizotinib", 
+                                     "Flatiron RWE \nunweighted, Crizotinib"))) %>%
+ # filter(dataset == "Flatiron RWE MAIC weighted") %>%
   filter(trt == "Crizotinib") %>%
-  ggplot(aes(x = time, y = surv, colour = dataset))+
+  ggplot(aes(x = time, y = surv, colour = dataset, fill = dataset))+
   theme_classic()+
-  theme(legend.position.inside = c(0.66,0.93),
-        legend.position = "inside",
+  theme(#legend.position.inside = c(0.2,0.3),
+        legend.position = "right",
         legend.text=element_text(size=9),
-        legend.spacing.y = unit(-6, "pt"),
+        legend.spacing.y = unit(0, "pt"),
         legend.spacing.x = unit(0, "pt"),
-        legend.key.spacing.y = unit(-8, "pt"),
-        legend.box.spacing = unit(-10, "pt"),
-        legend.title = element_text(size=12,
-                                    margin = margin(l = 0, r = 0, b = 0, t = 0))) +
+        legend.key.spacing.y = unit(4, "pt"),
+        legend.box.spacing = unit(0, "pt")#,
+        # legend.title = element_text(size=12,
+        #                             margin = margin(l = 0, r = 0, b = 0, t = 0))
+        ) +
   geom_step(linewidth = 0.8)+
-  scale_colour_manual("Dataset", 
+  geom_stepconfint(aes(ymin = lower, ymax = upper), alpha = 0.17, colour = NA )+
+  scale_colour_manual("Data, Treatment", 
                     values = c("#d6604d", "#7CAE00", "#00BFC4", "#C77CFF" ))+
+  scale_fill_manual("Data, Treatment", 
+                      values = c("#d6604d", "#7CAE00", "#00BFC4", "#C77CFF" ))+
   scale_y_continuous("Overall Survival", 
                      limits = c(0,1), labels = scales::percent)+
   scale_x_continuous("Time (years)",  breaks = 0:5, limits = c(0,5.5))
@@ -266,9 +286,9 @@ figure_2 <- plot_grid(plot_2a+
             theme(  plot.title = element_text(hjust = -0.1,
                                               size=14, face="bold"))+
             labs(title = "(b)"),
-          align = "h",
-          rel_widths  =c(0.5,0.5),
-          ncol = 2)
+          align = "vh",
+          rel_heights  =c(0.5,0.5),
+          ncol = 1)
 figure_2 
 
 tiff(file = "Figures/Figure_2.tiff",   
