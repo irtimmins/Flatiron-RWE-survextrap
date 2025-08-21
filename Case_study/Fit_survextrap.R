@@ -31,15 +31,16 @@ source("Functions/Survextrap_model.R")
 ######################################################
 
 trial_data <- readRDS("Data/trial_data.rds")
-historic_trial_aggregate <- readRDS("Data/historic_trial_aggregate_no_overlap.rds")
-external_data_aggregate <- readRDS("Data/external_data_no_overlap.rds")
+historic_trial_aggregate <- readRDS("Data/historic_trial_aggregate.rds")
+external_data_maic_weighted <- readRDS("Data/external_data_maic_weighted.rds")
+external_data_unweighted <- readRDS("Data/external_data_unweighted.rds")
 
-store_models <- "/projects/aa/klvq491/Flatiron_ansclc/models/"
+store_models <- "/projects/aa/klvq491/Flatiron_ansclc/models2/"
 
 ######################################################
 #  Specify scenarios.
 ######################################################
-##?survextrap()
+
 
 add_knots1 <- c(2, 3, 5)
 #add_knots2 <- c(2, 2.5, 3.5, 5)
@@ -47,9 +48,9 @@ add_knots1 <- c(2, 3, 5)
 
 base_scenarios <- expand_grid(
   model = c("PH", "NON-PH", "Separate_arms"),
-  datasets = c("trial_only", "trial_and_historic", "trial_and_all"),
-  df = c(3,6,10),
-  hsd_rate = c(1,5,10),
+  datasets = c("trial_only", "trial_and_historic", "trial_and_all_maic", "trial_and_all_unweighted"),
+  df = c(6,10),
+  hsd_rate = c(1,3),
   hrsd_rate = c(1,5,10),
   add_knots = paste0("add_knots", 1),
   fit_method = "mcmc") %>%
@@ -61,33 +62,14 @@ base_scenarios <- expand_grid(
     rmst_file = paste0(store_models, "base_model_", row_number(), "_rmst.rds"))
 
 #View(base_scenarios)
-#summary(as.factor(base_scenarios$hrsd_rate))
-#summary(as.factor(base_scenarios$model))
-
-# knots_sensitivity <- expand_grid(
-#   model = "PH",
-#   datasets = c("trial_only", "trial_and_historic", "trial_and_all"),
-#   df = c(3,6,10)) %>%
-#   mutate(
-#     hsd_rate = 5,
-#     hrsd_rate = if_else(model == "NON-PH", 5, NA)) %>%
-#   mutate(
-#     store_file = paste0(store_wd, "knots_model_", row_number(), ".rds"),
-#     hazard_survival_file = paste0(store_wd, "knots_model_", row_number(), "_hs.rds"),
-#     rmst_file = paste0(store_wd, "knots_model_", row_number(), "_rmst.rds"))
-
 
 ######################################################
 # Fit models, using pmap or slurm.
 ######################################################
 
 # using pmap.
-
-pmap(base_scenarios %>% 
-       select(-hazard_survival_file, -rmst_file),
-     fit_model)
-
-# pmap(knots_sensitivity %>% 
+# 
+# pmap(base_scenarios %>% 
 #        select(-hazard_survival_file, -rmst_file),
 #      fit_model)
 
@@ -102,7 +84,8 @@ check_status <- paste0("sacct -S ", as.character(Sys.Date()-20),
 
 objects_attach <- c("trial_data",
                     "historic_trial_aggregate",
-                    "external_data_aggregate",
+                    "external_data_maic_weighted",
+                    "external_data_unweighted",
                     "survextrap_mem",
                     paste0("add_knots", 1:1))
 
@@ -115,43 +98,32 @@ fit_base_slurm <- slurm_apply(
   base_scenarios %>% 
     select(-hazard_survival_file, -rmst_file), 
   jobname = "fit_base",
-  nodes = 20, 
+  nodes = 10, 
   cpus_per_node = 4, 
   submit = T,
   global_objects = objects_attach,
   pkgs = package_attach,
-  slurm_options = list(time='00:30:00',
+  slurm_options = list(time='01:00:00',
                        partition='core',
                        "mem-per-cpu"= '16G'))
 
-# fit_sensistivity_slurm <- slurm_apply(
-#   fit_model, 
-#   knots_sensitivity %>% 
-#     select(-hazard_survival_file, -rmst_file), 
-#   jobname = "fit_knots_sensitivity",
-#   nodes = 4, 
-#   cpus_per_node = 4, 
-#   submit = T,
-#   global_objects = objects_attach,
-#   pkgs = package_attach,
-#   slurm_options = list(time='01:00:00',
-#                        partition='core',
-#                        "mem-per-cpu"= '16G'))
-# check results.
-
 system(check_status)
 
-results_0 <- readRDS("_rslurm_fit_base/results_0.RDS")
-# results_0 <- readRDS("_rslurm_fit_knots_sensitivity/results_0.RDS")
-# results_0
+results_3 <- readRDS("_rslurm_fit_base/results_3.RDS")
+results_3
 
 ######################################################
 #  Get survival, hazard and rmst.
 ######################################################
 
+# pmap(base_scenarios %>% 
+#        select(-hazard_survival_file, -rmst_file) %>%
+#        slice(1),
+#      fit_model)
+
 pmap(base_scenarios %>% 
        select(store_file, hazard_survival_file) %>%
-       rename(model_file = store_file, store_file =  hazard_survival_file),
+       rename(model_file = store_file, store_file = hazard_survival_file),
      get_survival_and_hazard_survextrap)
 
 pmap(base_scenarios %>% 
@@ -179,7 +151,8 @@ rmst_base_slurm <- slurm_apply(
   get_rmst_survextrap, 
   base_scenarios %>% 
     select(store_file, rmst_file) %>%
-    rename(model_file = store_file, store_file =  rmst_file), 
+    rename(model_file = store_file, 
+           store_file =  rmst_file), 
   jobname = "rmst_base",
   nodes = 10, 
   cpus_per_node = 4, 
@@ -189,22 +162,6 @@ rmst_base_slurm <- slurm_apply(
   slurm_options = list(time='00:30:00',
                        partition='core',
                        "mem-per-cpu"= '16G'))
-
-# pmap(knots_sensitivity %>% 
-#        select(store_file, hazard_survival_file) %>%
-#        rename(model_file = store_file, store_file =  hazard_survival_file),
-#      get_survival_and_hazard_survextrap)
-# 
-# pmap(knots_sensitivity %>% 
-#        select(store_file, rmst_file) %>%
-#        rename(model_file = store_file, store_file =  rmst_file),
-#      get_rmst_survextrap)
-#
-# test <- readRDS("/scratch/klvq491/case_study_nice_ta536/base_model_1_rmst.rds")
-# test2 <- readRDS("/scratch/klvq491/case_study_nice_ta536/base_model_7_rmst.rds")
-# 
-# View(test)
-# View(test2)
 
 
 ######################################################
@@ -241,6 +198,7 @@ for(i in 1:nrow(base_scenarios)){
 base_results <- base_results %>%
   left_join(base_scenarios, by = "store_file")
 
+length(unique(base_results$store_file))
 
 saveRDS(base_results, 
         paste0(store_models, "base_model_all.rds"))
@@ -253,13 +211,13 @@ saveRDS(base_results,
 # Specify models to plot.
 df_value <- 6
 hsd_rate_value <- 1
-hrsd_rate_value <- 10
+hrsd_rate_value <- 5
 
 km_data_all <- readRDS("Data/km_data_all.rds")
 
 for(i in 1:3){
   
- # i <- 1
+  #i <- 1
   
   model_type <- c("PH", "NON-PH", "Separate_arms")[i]
   
@@ -277,15 +235,18 @@ for(i in 1:3){
     mutate(datasets = factor(datasets, 
                              levels = c("trial_only", 
                                         "trial_and_historic",
-                                        "trial_and_all"
+                                        "trial_and_all_maic",
+                                        "trial_and_all_unweighted"
                              ),
                              labels = c("ALEX trial data only", 
                                         "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 + Flatiron RWE"
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
                              ))) %>%  
     ggplot()+
     theme_classic()+
-    theme(legend.position = "bottom",
+    theme(strip.text.x = element_text(size = 8, margin = margin(3,2,3,2)),
+          legend.position = "bottom",
           legend.title = element_text(margin = margin(l = unit(4.0, 'cm'), r = unit(12.0, 'cm'))),
           legend.key.spacing.x =  unit(0.3, 'cm'),
           legend.box.spacing = unit(0, "inch"),
@@ -317,16 +278,19 @@ for(i in 1:3){
     mutate(datasets = factor(datasets, 
                              levels = c("trial_only", 
                                         "trial_and_historic",
-                                        "trial_and_all"
+                                        "trial_and_all_maic",
+                                        "trial_and_all_unweighted"
                              ),
                              labels = c("ALEX trial data only", 
                                         "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 + Flatiron RWE"
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
                              ))) %>%  
     filter(t > 0) %>%
     ggplot()+
     theme_classic()+
-    theme(legend.box = "horizontal",
+    theme(strip.text.x = element_text(size = 8, margin = margin(3,2,3,2)),
+          legend.box = "horizontal",
           legend.box.spacing = unit(0, "inch"),
           legend.title = element_text(margin = margin(b = 0.1)),
           plot.margin = unit(c(0.1,0,0,0), "cm"),
@@ -373,7 +337,7 @@ for(i in 1:3){
   
   tiff(file = figure_file,   
        width = 7.2, 
-       height = 6.0,
+       height = 7.5,
        units = 'in',  
        res = 300, 
        compression = "lzw")
@@ -390,7 +354,7 @@ for(i in 1:3){
 
 
 for(i in c(1,2)){
-
+#  i <- 1
   time_point <- c(5,20)[i]
   
 
@@ -414,6 +378,32 @@ for(i in c(1,2)){
     pull(upper) %>%
     max() + 0.1
   
+  high_y_axis <- base_results %>%
+    filter(variable == "rmst") %>%
+    filter(trt == "Crizotinib") %>%
+    filter(df == df_value) %>%
+    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
+    filter(hsd_rate == hsd_rate_value) %>%
+    filter(t == time_point) %>%
+    arrange(datasets) %>%
+    mutate(group_id = -row_number()) %>%
+    pull(group_id) %>%
+    max()+0.5
+  
+  low_y_axis <- base_results %>%
+    filter(variable == "rmst") %>%
+    filter(trt == "Crizotinib") %>%
+    filter(df == df_value) %>%
+    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
+    filter(hsd_rate == hsd_rate_value) %>%
+    filter(t == time_point) %>%
+    arrange(datasets) %>%
+    mutate(group_id = -row_number()) %>%
+    pull(group_id) %>%
+    min()-0.5
+  
+  
+  
   control_forest <- base_results %>%
     filter(variable == "rmst") %>%
     filter(trt == "Crizotinib") %>%
@@ -421,11 +411,14 @@ for(i in c(1,2)){
     mutate(datasets = factor(datasets, 
                              levels = c("trial_only", 
                                         "trial_and_historic",
-                                        "trial_and_all"
+                                        "trial_and_all_maic",
+                                        "trial_and_all_unweighted"
                              ),
                              labels = c("ALEX trial data only", 
                                         "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
+                             ))) %>%  
     mutate(model = factor(model, 
                           levels = c("PH", 
                                      "NON-PH",
@@ -467,11 +460,13 @@ for(i in c(1,2)){
     geom_linerange(aes(xmin = lower, xmax = upper, y = group_id, colour = datasets))+
     scale_x_continuous( paste0("RMST at ", time_point, "-years\n", "for Crizotinib"),
                         limits = c(low_x_axis, high_x_axis))+
+    scale_y_continuous( limits = c(low_y_axis, high_y_axis))+
     scale_shape_discrete("Model")+
     scale_colour_discrete("Datasets")+
     guides(                              
       shape = guide_legend(override.aes=list(colour = "gray60",
                                              fill = "gray60")))
+  control_forest
   
   active_forest <- base_results %>%
     filter(variable == "rmst") %>%
@@ -480,11 +475,14 @@ for(i in c(1,2)){
     mutate(datasets = factor(datasets, 
                              levels = c("trial_only", 
                                         "trial_and_historic",
-                                        "trial_and_all"
+                                        "trial_and_all_maic",
+                                        "trial_and_all_unweighted"
                              ),
                              labels = c("ALEX trial data only", 
                                         "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
+                             ))) %>%  
     mutate(model = factor(model, 
                           levels = c("PH", 
                                      "NON-PH",
@@ -526,6 +524,7 @@ for(i in c(1,2)){
     geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = datasets))+
     scale_x_continuous( paste0("RMST at ", time_point, "-years\n", "for Alectinib"),
                         limits = c(low_x_axis, high_x_axis))+
+    scale_y_continuous( limits = c(low_y_axis, high_y_axis))+
     scale_shape_discrete("Model")+
     scale_colour_discrete("Datasets")+
     guides(                              
@@ -538,11 +537,14 @@ for(i in c(1,2)){
     mutate(datasets = factor(datasets, 
                              levels = c("trial_only", 
                                         "trial_and_historic",
-                                        "trial_and_all"
+                                        "trial_and_all_maic",
+                                        "trial_and_all_unweighted"
                              ),
                              labels = c("ALEX trial data only", 
                                         "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 + Flatiron RWE"))) %>%  
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
+                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
+                             ))) %>%  
     mutate(model = factor(model, 
                           levels = c("PH", 
                                      "NON-PH",
@@ -586,6 +588,7 @@ for(i in c(1,2)){
                size = 2)+
     geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = datasets))+
     scale_x_continuous( paste0("Difference in \n RMST at ", time_point, "-years\n") )+
+    scale_y_continuous( limits = c(low_y_axis, high_y_axis))+
     scale_shape_discrete("Model")+
     scale_colour_discrete("Datasets")+
     guides(                              
@@ -634,13 +637,13 @@ plot_all <- ggdraw(
                       label_size = 12,
                       label_x = 0, ncol = 1,align = "v"),
             plot_grid(NULL, plot_grid(forest_legend , NULL, ncol = 1, rel_heights = c(1, 100)), ncol=1),
-            rel_widths=c(1, 0.65)))
+            rel_widths=c(1, 0.55)))
 
 plot_all
 
 tiff(file = "Figures/Figure_4.tiff",   
      width = 7.5, 
-     height = 5.0,
+     height = 5.7,
      units = 'in',  
      res = 300, 
      compression = "lzw")
@@ -658,7 +661,7 @@ sensitivity_figure1_a <- base_results  %>%
   filter(model == "NON-PH") %>%
   filter(df == 6) %>%
   filter(hrsd_rate == 10) %>% 
-  filter(datasets == "trial_and_all") %>%
+  filter(datasets ==  "trial_and_all_maic") %>%
   filter(t > 0) %>%
   mutate(prior = paste0("'\u03c3~'*`G`*`amma`*`(`*", 
                         2, "*`,`*" , 
@@ -695,7 +698,7 @@ sensitivity_figure1_b <- base_results  %>%
   filter(model == "NON-PH") %>%
   filter(df == 6) %>%
   filter(hrsd_rate == 10) %>%
-  filter(datasets == "trial_and_all") %>%
+  filter(datasets ==  "trial_and_all_maic") %>%
   filter(t > 0) %>%
   mutate(prior = paste0("'\u03c3~'*`G`*`amma`*`(`*", 
                         2, "*`,`*" , 
@@ -768,7 +771,7 @@ sensitivity_figure2_a <- base_results  %>%
   filter(model == "NON-PH") %>%
   filter(df == 6) %>%
   filter(hsd_rate == 1) %>%
-  filter(datasets == "trial_and_all") %>%
+  filter(datasets == "trial_and_all_maic") %>%
   filter(t > 0) %>%
   mutate(prior = paste0("'\u03C4~'*`G`*`amma`*`(`*", 
                         2, "*`,`*" , 
@@ -805,7 +808,7 @@ sensitivity_figure2_b <- base_results  %>%
   filter(model == "NON-PH") %>%
   filter(df == 6) %>%
   filter(hsd_rate == 1) %>%
-  filter(datasets == "trial_and_all") %>%
+  filter(datasets == "trial_and_all_maic") %>%
   filter(t > 0) %>%
   mutate(prior = paste0("'\u03C4~'*`G`*`amma`*`(`*", 
                         2, "*`,`*" , 
@@ -877,7 +880,7 @@ dev.off()
 sensitivity_figure3_a <-   base_results  %>%
   filter(variable == "survival") %>%
   filter(model == "NON-PH") %>%
-  filter(datasets == "trial_and_all") %>%
+  filter(datasets == "trial_and_all_maic") %>%
   filter(hrsd_rate == 10) %>%
   filter(hsd_rate == 1) %>%
   filter(t > 0) %>%
@@ -912,7 +915,7 @@ sensitivity_figure3_a
 sensitivity_figure3_b <- base_results  %>%
   filter(variable == "hazard") %>%
   filter(model == "NON-PH") %>%
-  filter(datasets == "trial_and_all") %>%
+  filter(datasets == "trial_and_all_maic") %>%
   filter(hrsd_rate == 10) %>%
   filter(hsd_rate == 1) %>%
   filter(t > 0) %>%

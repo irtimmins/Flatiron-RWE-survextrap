@@ -27,7 +27,9 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_
   
   if(datasets == "trial_only") external_data <- NULL
   if(datasets == "trial_and_historic") external_data <- historic_trial_aggregate
-  if(datasets == "trial_and_all") external_data <- external_data_aggregate
+  if(datasets == "trial_and_all_maic") external_data <- external_data_maic_weighted
+  if(datasets == "trial_and_all_unweighted") external_data <-   external_data_unweighted
+
   
   # Specify M-spline, and add extra knots for external data.
   
@@ -37,7 +39,9 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_
                              data = trial_data, 
                              df=df)
     
-  } else if (datasets %in% c("trial_and_historic", "trial_and_all")) {
+  } else if (datasets %in% c("trial_and_historic", 
+                             "trial_and_all_maic",
+                             "trial_and_all_unweighted")) {
 
     mspline <-  mspline_spec(Surv(time,status) ~ trt, 
                              data = trial_data,
@@ -46,7 +50,17 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_
         
   }
 
-  # Fit models.
+  # Define priors.
+  
+  prior_hscale <- p_meansurv(median=5, upper=20, mspline=mspline)
+  prior_hsd <- p_gamma(2, hsd_rate)
+  prior_loghr <- p_hr(median=1, upper=10)
+  
+  if(model == "NON-PH"){
+    prior_hrsd <- p_gamma(2, hrsd_rate)
+  }
+  
+    # Fit models.
   
   
   if(model == "PH"){
@@ -55,7 +69,9 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_
                               data = trial_data , 
                               external = external_data,
                               mspline = mspline,
-                              prior_hsd = p_gamma(2, hsd_rate),
+                              prior_hscale = prior_hscale,
+                              prior_loghr = prior_loghr,
+                              prior_hsd = prior_hsd,
                               fit_method = fit_method)
     
     
@@ -66,8 +82,10 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_
                               nonprop = T,
                               external = external_data,
                               mspline = mspline,
-                              prior_hsd = p_gamma(2, hsd_rate),
-                              prior_hrsd = p_gamma(2, hrsd_rate),
+                              prior_hscale = prior_hscale,
+                              prior_loghr = prior_loghr,
+                              prior_hsd = prior_hsd,
+                              prior_hrsd = prior_hrsd,
                               fit_method = fit_method)
     
   }else if(model == "Separate_arms"){
@@ -76,14 +94,18 @@ fit_model <- function(model, datasets, df , hsd_rate, hrsd_rate, add_knots, fit_
                                       data = trial_data %>% filter(trt == "Crizotinib") , 
                                       external = external_data,
                                       mspline = mspline,
-                                      prior_hsd = p_gamma(2, hsd_rate),
+                                      prior_hscale = prior_hscale,
+                                      prior_loghr = prior_loghr,
+                                      prior_hsd = prior_hsd,
                                       fit_method = fit_method)
     
     
     results_active <- survextrap_mem(Surv(time,status) ~ 1, 
                                      data = trial_data %>% filter(trt == "Alectinib") , 
                                      mspline = list("df"=df),
-                                     prior_hsd = p_gamma(2, hsd_rate),
+                                     prior_hscale = prior_hscale,
+                                     prior_loghr = prior_loghr,
+                                     prior_hsd = prior_hsd,
                                      fit_method = fit_method)
     
     results <- list(control = results_control, active = results_active)
