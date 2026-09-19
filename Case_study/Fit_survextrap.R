@@ -1,982 +1,266 @@
+# Fitting the survextrap grid on the cluster.
+#
+# Eighteen primary scenarios: three treatment effect models by three
+# evidence sets by two data cuts. Four sensitivities, all on the fullest
+# evidence under non-proportional hazards, February cut, each changing
+# one thing so its effect is readable.
+#
+# Priors come from Data/prior_sets.rds, written by Check_prior_packages.R
+# after every set was checked against the landmarks under every spline
+# used here. Nothing is retyped.
 
-library(populationmodels)
-library(rwdcohort)
-library(ggplot2)
-library(survival)
-library(survminer)
-library(maic)
-library(azci)
-library(bshazard)
 library(dplyr)
 library(tidyr)
-library(ggplot2)
-library(survival)
-library(survminer)
-library(survextrap)
-library(ggh4x)
-library(condsurv)
-library(cowplot)
-library(flexsurv)
 library(purrr)
+library(survival)
+library(survextrap)
 library(rslurm)
-
-######################################################
-#  Load helper functions.
-######################################################
 
 source("Functions/Survextrap_model.R")
 
-######################################################
-#  Get data
-######################################################
 
-trial_data <- readRDS("Data/trial_data.rds")
-historic_trial_aggregate <- readRDS("Data/historic_trial_aggregate.rds")
-external_data_maic_weighted <- readRDS("Data/external_data_maic_weighted.rds")
-external_data_unweighted <- readRDS("Data/external_data_unweighted.rds")
+#  Settings
 
-store_models <- "/projects/aa/klvq491/Flatiron_ansclc/models2/"
+fit_method <- "mcmc"          # "opt" for a quick test run
 
-######################################################
-#  Specify scenarios.
-######################################################
+data_dir <- file.path(getwd(), "Data")
+store_models <- file.path(getwd(), "models")
+dir.create(store_models, showWarnings = FALSE)
+
+backhaz_file <- file.path(data_dir, "backhaz.rds")
+
+# Knots. With no external data the boundary sits at the end of the trial,
+# since nothing informs a knot beyond it; the December cut runs further,
+# so its knots start later. The sensitivity sets add a knot at ten and
+# one inside the data.
+add_knots_feb_trial <- c(2)
+add_knots_feb_ext   <- c(2, 5)
+add_knots_dec_trial <- c(3)
+add_knots_dec_ext   <- c(3, 5)
+add_knots_feb_10y   <- c(2, 5, 10)
+add_knots_feb_3     <- c(2, 3, 5)
+
+prior_sets <- readRDS(file.path(data_dir, "prior_sets.rds"))
+chosen <- prior_sets %>% filter(set == "chosen")
+tighter <- prior_sets %>% filter(set == "tighter")
+
+if (!nrow(chosen)) stop("prior_sets.rds has no chosen set")
+
+cuts <- tibble(
+  data_cut  = c("feb_2017", "dec_2017"),
+  cut_label = c("February 2017", "December 2017"),
+  suffix    = c("", "_dec_2017"))
+
+external_path <- function(datasets, suffix) {
+  case_when(
+    datasets == "trial_only" ~ NA_character_,
+    datasets == "trial_and_historic" ~
+      paste0(data_dir, "/historic_trial_aggregate", suffix, ".rds"),
+    datasets == "trial_and_all_maic" ~
+      paste0(data_dir, "/external_data_maic_weighted", suffix, ".rds"),
+    datasets == "trial_and_all_unweighted" ~
+      paste0(data_dir, "/external_data_unweighted", suffix, ".rds"))
+}
 
 
-add_knots1 <- c(2, 3, 5)
-#add_knots2 <- c(2, 2.5, 3.5, 5)
-#add_knots3 <- c(2, 2.5, 3.5, 4, 4.5, 5)
+#  The eighteen primary scenarios
 
-base_scenarios <- expand_grid(
+primary <- expand_grid(
+  data_cut = cuts$data_cut,
   model = c("PH", "NON-PH", "Separate_arms"),
-  datasets = c("trial_only", "trial_and_historic", "trial_and_all_maic", "trial_and_all_unweighted"),
-  df = c(6,10),
-  hsd_rate = c(1,3),
-  hrsd_rate = c(1,5,10),
-  add_knots = paste0("add_knots", 1),
-  fit_method = "mcmc") %>%
-  mutate(hrsd_rate = if_else(model == "NON-PH", hrsd_rate, NA)) %>%
-  distinct() %>%
+  datasets = c("trial_only", "trial_and_historic",
+               "trial_and_all_maic")) %>%
+  left_join(cuts, by = "data_cut") %>%
   mutate(
-    store_file = paste0(store_models, "base_model_", row_number(), ".rds"),
-    hazard_survival_file = paste0(store_models, "base_model_", row_number(), "_hs.rds"),
-    rmst_file = paste0(store_models, "base_model_", row_number(), "_rmst.rds"))
+    scenario = "primary",
+    df = 5,
+    add_knots = case_when(
+      data_cut == "feb_2017" & datasets == "trial_only" ~
+        "add_knots_feb_trial",
+      data_cut == "feb_2017" ~ "add_knots_feb_ext",
+      data_cut == "dec_2017" & datasets == "trial_only" ~
+        "add_knots_dec_trial",
+      TRUE ~ "add_knots_dec_ext"),
+    hsd_rate = chosen$hsd_rate, eta_med = chosen$eta_med,
+    eta_up = chosen$eta_up, tau_rate = chosen$tau_rate)
 
-#View(base_scenarios)
 
-######################################################
-# Fit models, using pmap or slurm.
-######################################################
+#  Four sensitivities, one change each
+#
+# The reference is non-PH on the fullest evidence, February cut. Each row
+# below differs from it in one respect, so the comparison is readable
+# without a factorial expansion.
 
-# using pmap.
-# 
-# pmap(base_scenarios %>% 
-#        select(-hazard_survival_file, -rmst_file),
-#      fit_model)
+ref <- primary %>%
+  filter(data_cut == "feb_2017", model == "NON-PH",
+         datasets == "trial_and_all_maic")
 
-######################################################
+sens <- bind_rows(
+  # how much does the tail assumption drive the answer
+  ref %>% mutate(scenario = "knots_10y", add_knots = "add_knots_feb_10y"),
+  # does more flexibility inside the data change it
+  ref %>% mutate(scenario = "knots_df8", df = 8,
+                 add_knots = "add_knots_feb_3"),
+  # the tighter of the two prior sets that held under every spline
+  ref %>% mutate(scenario = "priors_tighter",
+                 hsd_rate = tighter$hsd_rate, eta_med = tighter$eta_med,
+                 eta_up = tighter$eta_up, tau_rate = tighter$tau_rate),
+  # how much does the MAIC weighting matter
+  ref %>% mutate(scenario = "unweighted",
+                 datasets = "trial_and_all_unweighted"))
 
-# or using slurm:
+if (!nrow(tighter))
+  sens <- sens %>% filter(scenario != "priors_tighter")
 
-user <- Sys.info()["user"]
-check_status <- paste0("sacct -S ", as.character(Sys.Date()-20),
-                       " -u ", user ,
-                       " --format=JobID,Jobname,partition,state,elapsed,ncpus -X")
 
-objects_attach <- c("trial_data",
-                    "historic_trial_aggregate",
-                    "external_data_maic_weighted",
-                    "external_data_unweighted",
-                    "survextrap_mem",
-                    paste0("add_knots", 1:1))
+#  The grid
+
+base_scenarios <- bind_rows(primary, sens) %>%
+  mutate(
+    fit_method = fit_method,
+    backhaz_file = backhaz_file,
+    trial_file = paste0(data_dir, "/trial_data", suffix, ".rds"),
+    external_file = external_path(datasets, suffix)) %>%
+  mutate(
+    store_file = paste0(store_models, "/base_model_", row_number(), ".rds"),
+    hazard_survival_file = paste0(store_models, "/base_model_",
+                                  row_number(), "_hs.rds"),
+    rmst_file = paste0(store_models, "/base_model_",
+                       row_number(), "_rmst.rds"),
+    diagnostics_file = paste0(store_models, "/base_model_",
+                              row_number(), "_diag.rds"))
+
+cat(nrow(base_scenarios), "scenarios:",
+    sum(base_scenarios$scenario == "primary"), "primary,",
+    sum(base_scenarios$scenario != "primary"), "sensitivity\n\n")
+print(as.data.frame(base_scenarios %>%
+                      count(scenario, model, datasets, name = "n")), row.names = FALSE)
+
+missing <- unique(c(base_scenarios$trial_file,
+                    na.omit(base_scenarios$external_file), backhaz_file))
+missing <- missing[!file.exists(missing)]
+if (length(missing)) stop("missing: ", paste(missing, collapse = ", "))
+
+
+#  Fit with slurm
+
+objects_attach <- c("survextrap_mem",
+                    "add_knots_feb_trial", "add_knots_feb_ext",
+                    "add_knots_dec_trial", "add_knots_dec_ext",
+                    "add_knots_feb_10y", "add_knots_feb_3",
+                    "takes_disc", "summarise_samples")
 
 package_attach <- c("dplyr", "tidyr", "readr",
-                   "survextrap", "rstan", "survival",
-                    "posterior")
+                    "survextrap", "rstan", "survival", "posterior")
+
+check_status <- paste0("sacct -S ", as.character(Sys.Date() - 20),
+                       " -u ", Sys.info()["user"],
+                       " --format=JobID,Jobname,partition,state,elapsed,ncpus -X")
 
 fit_base_slurm <- slurm_apply(
-  fit_model, 
-  base_scenarios %>% 
-    select(-hazard_survival_file, -rmst_file), 
+  fit_model,
+  base_scenarios %>%
+    select(model, datasets, df, add_knots, hsd_rate, eta_med, eta_up,
+           tau_rate, fit_method, trial_file, external_file, backhaz_file,
+           store_file),
   jobname = "fit_base",
-  nodes = 10, 
-  cpus_per_node = 4, 
-  submit = T,
+  nodes = 22,
+  cpus_per_node = 4,
+  submit = TRUE,
   global_objects = objects_attach,
   pkgs = package_attach,
-  slurm_options = list(time='01:00:00',
-                       partition='core',
-                       "mem-per-cpu"= '16G'))
+  slurm_options = list(time = '04:00:00',
+                       "mem-per-cpu" = '16G'))
 
 system(check_status)
 
-results_3 <- readRDS("_rslurm_fit_base/results_3.RDS")
-results_3
 
-######################################################
-#  Get survival, hazard and rmst.
-######################################################
+#  Survival, hazard, rmst and diagnostics
+#
+# Wait for the fitting jobs to finish before submitting these.
 
-# pmap(base_scenarios %>% 
-#        select(-hazard_survival_file, -rmst_file) %>%
-#        slice(1),
-#      fit_model)
-
-pmap(base_scenarios %>% 
-       select(store_file, hazard_survival_file) %>%
-       rename(model_file = store_file, store_file = hazard_survival_file),
-     get_survival_and_hazard_survextrap)
-
-pmap(base_scenarios %>% 
-       select(store_file, rmst_file) %>%
-       rename(model_file = store_file, store_file =  rmst_file),
-     get_rmst_survextrap)
-
-sh_base_slurm <- slurm_apply(
-  get_survival_and_hazard_survextrap, 
-  base_scenarios %>%  
-    select(store_file, hazard_survival_file) %>%
-    rename(model_file = store_file, store_file =  hazard_survival_file), 
-  jobname = "sh_base",
-  nodes = 10, 
-  cpus_per_node = 4, 
-  submit = T,
-  global_objects = objects_attach,
-  pkgs = package_attach,
-  slurm_options = list(time='00:30:00',
-                       partition='core',
-                       "mem-per-cpu"= '16G'))
-
-
-rmst_base_slurm <- slurm_apply(
-  get_rmst_survextrap, 
-  base_scenarios %>% 
-    select(store_file, rmst_file) %>%
-    rename(model_file = store_file, 
-           store_file =  rmst_file), 
-  jobname = "rmst_base",
-  nodes = 10, 
-  cpus_per_node = 4, 
-  submit = T,
-  global_objects = objects_attach,
-  pkgs = package_attach,
-  slurm_options = list(time='00:30:00',
-                       partition='core',
-                       "mem-per-cpu"= '16G'))
-
-
-######################################################
-#  Plot results.
-######################################################
-
-# read in results from base scenarios.
-
-base_scenarios
-
-for(i in 1:nrow(base_scenarios)){
-
-  temp_hs <- readRDS(base_scenarios$hazard_survival_file[i]) %>%
-    mutate(store_file = base_scenarios$store_file[i])
-  
-   temp_rmst <- readRDS(base_scenarios$rmst_file[i])  %>%
-     mutate(store_file = base_scenarios$store_file[i])
-  
-  if(i == 1){
-    
-    base_results <- temp_hs %>% 
-      bind_rows(temp_rmst) 
-    
-  } else {
-    
-    base_results <-  base_results %>%
-      bind_rows(temp_hs)   %>%
-      bind_rows(temp_rmst)
-    
-    
-  }
+run_over <- function(f, in_col, out_col, jobname, time) {
+  slurm_apply(
+    f,
+    base_scenarios %>%
+      select(all_of(c(in_col, out_col))) %>%
+      rename(model_file = !!in_col, store_file = !!out_col),
+    jobname = jobname,
+    nodes = 22,
+    cpus_per_node = 4,
+    submit = TRUE,
+    global_objects = objects_attach,
+    pkgs = package_attach,
+    slurm_options = list(time = time, "mem-per-cpu" = '16G'))
 }
 
-base_results <- base_results %>%
+sh_base_slurm <- run_over(get_survival_and_hazard_survextrap,
+                          "store_file", "hazard_survival_file",
+                          "sh_base", '00:30:00')
+
+rmst_base_slurm <- run_over(get_rmst_survextrap,
+                            "store_file", "rmst_file",
+                            "rmst_base", '00:30:00')
+
+diag_base_slurm <- run_over(get_diagnostics_survextrap,
+                            "store_file", "diagnostics_file",
+                            "diag_base", '00:30:00')
+
+system(check_status)
+
+
+#  Combine
+#
+# Wait for the three jobs above to finish.
+
+read_all <- function(col) {
+  bind_rows(lapply(seq_len(nrow(base_scenarios)), function(i) {
+    f <- base_scenarios[[col]][i]
+    if (!file.exists(f)) return(NULL)
+    readRDS(f) %>% mutate(store_file = base_scenarios$store_file[i])
+  }))
+}
+
+base_results <- bind_rows(read_all("hazard_survival_file"),
+                          read_all("rmst_file")) %>%
   left_join(base_scenarios, by = "store_file")
 
-length(unique(base_results$store_file))
+saveRDS(base_results, paste0(data_dir, "/base_model_all.rds"))
 
-saveRDS(base_results, 
-        paste0(store_models, "base_model_all.rds"))
+diagnostics <- read_all("diagnostics_file") %>%
+  left_join(base_scenarios, by = "store_file")
+
+saveRDS(diagnostics, paste0(data_dir, "/base_model_diagnostics.rds"))
 
 
-############################################################
-# Survival/hazard plot figure.
-############################################################
+#  Check the run
+#
+# A slurm array can lose individual tasks while the rest complete, so
+# this is worth checking before anything is read into a table or figure.
 
-# Specify models to plot.
-df_value <- 6
-hsd_rate_value <- 1
-hrsd_rate_value <- 5
+cat("\nscenarios expected:", nrow(base_scenarios),
+    " with results:", length(unique(base_results$store_file)), "\n")
 
-km_data_all <- readRDS("Data/km_data_all.rds")
-
-for(i in 1:3){
-  
-  #i <- 1
-  
-  model_type <- c("PH", "NON-PH", "Separate_arms")[i]
-  
-  figure_file <- c("Figures/Sup_figure_5_ph.tiff",
-                   "Figures/Figure_3_nonph.tiff",
-                   "Figures/Sup_figure_6_sep_arms.tiff")[i]
-  
-  #model_type <- "PH"
-
-  figure3_a <- base_results  %>%
-    filter(variable == "survival", add_knots == "add_knots1") %>%
-    filter_model(model = model_type, df = 6, hrsd_rate = hrsd_rate_value) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t > 0) %>%
-    mutate(datasets = factor(datasets, 
-                             levels = c("trial_only", 
-                                        "trial_and_historic",
-                                        "trial_and_all_maic",
-                                        "trial_and_all_unweighted"
-                             ),
-                             labels = c("ALEX trial data only", 
-                                        "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
-                             ))) %>%  
-    ggplot()+
-    theme_classic()+
-    theme(strip.text.x = element_text(size = 8, margin = margin(3,2,3,2)),
-          legend.position = "bottom",
-          legend.title = element_text(margin = margin(l = unit(4.0, 'cm'), r = unit(12.0, 'cm'))),
-          legend.key.spacing.x =  unit(0.3, 'cm'),
-          legend.box.spacing = unit(0, "inch"),
-          plot.margin = unit(c(0.1,0,0,0), "cm"),
-          legend.spacing = unit(c(0,0,0,0), "cm"),
-          legend.spacing.x = unit(0, "mm"),
-          legend.spacing.y = unit(0, "mm"))+
-    geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-                alpha = 0.25, colour =  NA)+
-    geom_line(aes(x = t, y = median, colour = trt))+
-    geom_line(data = km_data_all %>% 
-                filter(dataset == "ALEX trial") %>% 
-                select(-c(dataset,model)),
-              aes(x = time, y = surv, colour = trt) )+
-    scale_colour_discrete("Treatment")+
-    scale_fill_discrete("Treatment")+
-    scale_y_continuous(limits = c(0,1),labels = scales::percent)+
-    ylab("Overall Survival")+
-    xlab("Time (years)")+
-    facet_wrap(~datasets, ncol = 1)
-  
-  figure3_a
-  
-  figure3_b <- base_results  %>%
-    filter(variable == "hazard", add_knots == "add_knots1") %>%
-    filter_model(model = model_type, df = 6, hrsd_rate = hrsd_rate_value) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t > 0) %>%
-    mutate(datasets = factor(datasets, 
-                             levels = c("trial_only", 
-                                        "trial_and_historic",
-                                        "trial_and_all_maic",
-                                        "trial_and_all_unweighted"
-                             ),
-                             labels = c("ALEX trial data only", 
-                                        "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
-                             ))) %>%  
-    filter(t > 0) %>%
-    ggplot()+
-    theme_classic()+
-    theme(strip.text.x = element_text(size = 8, margin = margin(3,2,3,2)),
-          legend.box = "horizontal",
-          legend.box.spacing = unit(0, "inch"),
-          legend.title = element_text(margin = margin(b = 0.1)),
-          plot.margin = unit(c(0.1,0,0,0), "cm"),
-          legend.spacing = unit(c(0,0,0,0), "cm"),
-          legend.spacing.x = unit(0, "mm"),
-          legend.spacing.y = unit(0, "mm"))+
-    geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-                alpha = 0.25, colour =  NA)+
-    geom_line(aes(x = t, y = median, colour = trt))+
-    scale_colour_discrete("Treatment")+
-    scale_fill_discrete("Treatment")+
-    scale_y_continuous("Hazard", limits = c(0, 0.45))+
-    xlab("Time (years)")+
-    facet_wrap(~datasets, ncol = 1)
-  
-  figure3_b
-  
-  plot_legend <- get_legend_35(figure3_a)
-  
-  plot_figure_3_no_legend <- plot_grid(
-    figure3_a +
-      theme(legend.position="none",
-            plot.title = element_text(hjust = -0.1,
-                                      vjust = -0.02,
-                                      size=14, face="bold"))+
-      labs(title = "(a)"),
-    NULL,
-    figure3_b+
-      theme(legend.position="none",
-            plot.title = element_text(hjust = -0.1,
-                                      vjust = -0.02,
-                                      size=14, face="bold"))+
-      labs(title = "(b)"), 
-    rel_widths = c(0.51,0.01, 0.5),
-    ncol = 3)
-  
-  plot_figure_3 <- plot_grid(plot_figure_3_no_legend,
-                             NULL,
-                             plot_legend, 
-                             rel_heights = c(0.9,-0.01, 0.1),
-                             ncol = 1)
-  
-  plot_figure_3
-  
-  tiff(file = figure_file,   
-       width = 7.2, 
-       height = 7.5,
-       units = 'in',  
-       res = 300, 
-       compression = "lzw")
-  print(plot_figure_3)
-  dev.off()
-  
-  
+lost <- setdiff(base_scenarios$store_file, unique(base_results$store_file))
+if (length(lost)) {
+  cat("missing results for", length(lost), "scenarios:\n")
+  print(as.data.frame(base_scenarios %>%
+                        filter(store_file %in% lost) %>%
+                        select(scenario, data_cut, model, datasets)), row.names = FALSE)
 }
 
+# rhat above 1.01 means the chains have not mixed, and any divergent
+# transitions mean part of the posterior was not explored. Either way
+# that model's intervals should not be reported.
+flagged <- diagnostics %>%
+  filter(max_rhat > 1.01 | divergences > 0 | is.na(max_rhat))
 
-############################################################
-# Forest plot figure.
-############################################################
+cat("\nmodels with poor convergence:", nrow(flagged),
+    "of", nrow(diagnostics), "\n")
 
-
-for(i in c(1,2)){
-#  i <- 1
-  time_point <- c(5,20)[i]
-  
-
-  vlines_rmst <- list(seq(from = 2, to = 4, by = 0.5),
-                      seq(from = 2.5, to = 12.5, by = 2.5))
-  vlines_irmst <- list(seq(from = -0.5, to = 1, by = 0.5),
-                       seq(from = -5, to = 2.5, by = 2.5))
-  alpha_lines <- 0.4
-  
-  low_increment = c(0.1, 0.4)
-  
-  low_x_axis <- base_results %>%
-    filter(variable == "rmst") %>%
-    filter(t == time_point) %>%
-    pull(lower) %>%
-    min() - low_increment[i]
-  
-  high_x_axis <- base_results %>%
-    filter(variable == "rmst") %>%
-    filter(t == time_point) %>%
-    pull(upper) %>%
-    max() + 0.1
-  
-  high_y_axis <- base_results %>%
-    filter(variable == "rmst") %>%
-    filter(trt == "Crizotinib") %>%
-    filter(df == df_value) %>%
-    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t == time_point) %>%
-    arrange(datasets) %>%
-    mutate(group_id = -row_number()) %>%
-    pull(group_id) %>%
-    max()+0.5
-  
-  low_y_axis <- base_results %>%
-    filter(variable == "rmst") %>%
-    filter(trt == "Crizotinib") %>%
-    filter(df == df_value) %>%
-    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t == time_point) %>%
-    arrange(datasets) %>%
-    mutate(group_id = -row_number()) %>%
-    pull(group_id) %>%
-    min()-0.5
-  
-  
-  
-  control_forest <- base_results %>%
-    filter(variable == "rmst") %>%
-    filter(trt == "Crizotinib") %>%
-    filter(t > 0) %>%
-    mutate(datasets = factor(datasets, 
-                             levels = c("trial_only", 
-                                        "trial_and_historic",
-                                        "trial_and_all_maic",
-                                        "trial_and_all_unweighted"
-                             ),
-                             labels = c("ALEX trial data only", 
-                                        "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
-                             ))) %>%  
-    mutate(model = factor(model, 
-                          levels = c("PH", 
-                                     "NON-PH",
-                                     "Separate_arms"
-                          ),
-                          labels = c("PH", 
-                                     "Non-PH",
-                                     "Separate arms"))) %>%  
-    filter(df == df_value) %>%
-    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t == time_point) %>%
-    arrange(datasets) %>%
-    #group_by(trt) %>%
-    mutate(group_id = -row_number()) %>%
-    # mutate(index = paste0("group", row_number())) %>%
-    ggplot()+
-    theme_classic()+
-    theme(panel.grid = element_blank(),
-          panel.border = element_blank(),
-          axis.line.y=element_blank(),
-          axis.text.y=element_blank(),
-          axis.ticks.y=element_blank(),
-          axis.title.y=element_blank(),
-         axis.text.x = element_text( size = 8), #, angle = 45, vjust = 0.5, hjust=0.5),
-   #      axis.title.x = element_text( face="bold",size = 10),
-         axis.title.x = element_text( size = 10),
-          legend.background = element_blank(),
-          legend.box.background = element_rect(colour = "black"),
-          legend.key.spacing.y = unit(3, "pt"),
-          legend.text = element_text(size=8)) + 
-    geom_vline(xintercept = vlines_rmst[[i]],
-               colour = "gray70",
-               alpha = alpha_lines)+
-    geom_point(aes( x = median, y=group_id, colour = datasets, shape =  model),
-               alpha = 1,
-               stroke = 1,
-               size = 2)+
-    geom_linerange(aes(xmin = lower, xmax = upper, y = group_id, colour = datasets))+
-    scale_x_continuous( paste0("RMST at ", time_point, "-years\n", "for Crizotinib"),
-                        limits = c(low_x_axis, high_x_axis))+
-    scale_y_continuous( limits = c(low_y_axis, high_y_axis))+
-    scale_shape_discrete("Model")+
-    scale_colour_discrete("Datasets")+
-    guides(                              
-      shape = guide_legend(override.aes=list(colour = "gray60",
-                                             fill = "gray60")))
-  control_forest
-  
-  active_forest <- base_results %>%
-    filter(variable == "rmst") %>%
-    filter(trt == "Alectinib") %>%
-    filter(t > 0) %>%
-    mutate(datasets = factor(datasets, 
-                             levels = c("trial_only", 
-                                        "trial_and_historic",
-                                        "trial_and_all_maic",
-                                        "trial_and_all_unweighted"
-                             ),
-                             labels = c("ALEX trial data only", 
-                                        "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
-                             ))) %>%  
-    mutate(model = factor(model, 
-                          levels = c("PH", 
-                                     "NON-PH",
-                                     "Separate_arms"
-                          ),
-                          labels = c("PH", 
-                                     "Non-PH",
-                                     "Separate arms"))) %>%  
-    filter(df == df_value) %>%
-    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t == time_point) %>%
-    arrange(datasets) %>%
-    #group_by(trt) %>%
-    mutate(group_id = -row_number()) %>%
-    # mutate(index = paste0("group", row_number())) %>%
-    ggplot()+
-    theme_classic()+
-    theme(panel.grid = element_blank(),
-          panel.border = element_blank(),
-          axis.line.y=element_blank(),
-          axis.text.y=element_blank(),
-          axis.ticks.y=element_blank(),
-          axis.title.y=element_blank(),
-          axis.text.x = element_text( size = 8), #, angle = 45, vjust = 0.5, hjust=0.5),
-      #    axis.title.x = element_text( face="bold",size = 10),
-         axis.title.x = element_text(size = 10),
-          legend.background = element_blank(),
-          legend.box.background = element_rect(colour = "black"),
-          legend.key.spacing.y = unit(3, "pt"),
-          legend.text = element_text(size=8)) + 
-    geom_vline(xintercept = vlines_rmst[[i]],
-               colour = "gray70",
-               alpha = alpha_lines)+
-    geom_point(aes( x = median, y=group_id, colour = datasets, shape =  model),
-               alpha = 1,
-               stroke = 1,
-               size = 2)+
-    geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = datasets))+
-    scale_x_continuous( paste0("RMST at ", time_point, "-years\n", "for Alectinib"),
-                        limits = c(low_x_axis, high_x_axis))+
-    scale_y_continuous( limits = c(low_y_axis, high_y_axis))+
-    scale_shape_discrete("Model")+
-    scale_colour_discrete("Datasets")+
-    guides(                              
-      shape = guide_legend(override.aes=list(colour = "gray60",
-                                             fill = "gray60")))
-  
-  difference_forest <- base_results %>%
-    filter(variable == "irmst") %>%
-    filter(t > 0) %>%
-    mutate(datasets = factor(datasets, 
-                             levels = c("trial_only", 
-                                        "trial_and_historic",
-                                        "trial_and_all_maic",
-                                        "trial_and_all_unweighted"
-                             ),
-                             labels = c("ALEX trial data only", 
-                                        "ALEX + PROFILE-1014",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (MAIC)",
-                                        "ALEX + PROFILE-1014 +\nFlatiron RWE (unweighted)"
-                             ))) %>%  
-    mutate(model = factor(model, 
-                          levels = c("PH", 
-                                     "NON-PH",
-                                     "Separate_arms"
-                          ),
-                          labels = c("PH", 
-                                     "Non-PH",
-                                     "Separate arms"))) %>%  
-    filter(df == df_value) %>%
-    filter(hrsd_rate == hrsd_rate_value | is.na(hrsd_rate)) %>%
-    filter(hsd_rate == hsd_rate_value) %>%
-    filter(t == time_point) %>%
-    arrange(datasets) %>%
-    #group_by(trt) %>%
-    mutate(group_id = -row_number()) %>%
-    # mutate(index = paste0("group", row_number())) %>%
-    ggplot()+
-    theme_classic()+
-    theme(panel.grid = element_blank(),
-          panel.border = element_blank(),
-          axis.line.y=element_blank(),
-          axis.text.y=element_blank(),
-          axis.ticks.y=element_blank(),
-          axis.title.y=element_blank(),
-          axis.text.x = element_text( size = 8), #, angle = 45, vjust = 0.5, hjust=0.5),
-     #     axis.title.x = element_text( face="bold",size = 10),
-          axis.title.x = element_text(size = 10),
-          legend.background = element_blank(),
-          legend.box.background = element_rect(colour = "black"),
-          legend.key.spacing.y = unit(3, "pt"),
-          legend.text = element_text(size=8)) + 
-    geom_vline(xintercept = vlines_irmst[[i]],
-               colour = "gray70",
-               alpha = alpha_lines)+
-    geom_vline(xintercept = 0,
-               colour = "gray20",
-               alpha = alpha_lines)+
-    geom_point(aes( x = median, y=group_id, colour = datasets, shape =  model),
-               alpha = 1,
-               stroke = 1,
-               size = 2)+
-    geom_linerange(aes(xmin=  lower, xmax = upper, y = group_id, colour = datasets))+
-    scale_x_continuous( paste0("Difference in \n RMST at ", time_point, "-years\n") )+
-    scale_y_continuous( limits = c(low_y_axis, high_y_axis))+
-    scale_shape_discrete("Model")+
-    scale_colour_discrete("Datasets")+
-    guides(                              
-      shape = guide_legend(override.aes=list(colour = "gray60",
-                                             fill = "gray60")))
-  
-  
-  forest_legend <- cowplot::get_legend(
-    # create some space to the left of the legend
-    active_forest + theme(legend.box.margin = margin(0, 12, 0, 0))
-  )
-
-  forest_plots <- plot_grid(control_forest+
-                              theme(legend.position="none",
-                                    plot.title = element_text(size=10, face="bold")),#+
-                          #    labs(title = plot_label),
-                            active_forest+
-                              theme(legend.position="none",
-                                    plot.title = element_text(size=10, face="bold")),#+
-                       #       labs(title = " "),
-                            difference_forest+
-                              theme(legend.position="none",
-                                    plot.title = element_text(size=10, face="bold")),#+
-                            #  labs(title = " "),
-                            align = "h",
-                            rel_widths=c(1,1,1),
-                            nrow = 1)
-  print(i)
-  
-  assign(paste0("forest",i), forest_plots)
+if (nrow(flagged)) {
+  print(as.data.frame(flagged %>%
+                        select(scenario, data_cut, model, datasets, arm,
+                               max_rhat, min_ess, divergences) %>%
+                        arrange(desc(max_rhat))), row.names = FALSE)
 }
-
-# forest
-# forest1
-# forest2
-# 
-# plot_grid(forest_plots,
-#           forest_legend,
-#           rel_widths=c(1, 0.6),
-#           axis = "l"
-# )
-
-plot_all <- ggdraw(
-  plot_grid(plot_grid(NULL,forest1, NULL, forest2, rel_heights = c(0.06, 0.5, 0.06, 0.5),  
-                      labels = c("(a)", "", "(b)", ""),
-                      label_size = 12,
-                      label_x = 0, ncol = 1,align = "v"),
-            plot_grid(NULL, plot_grid(forest_legend , NULL, ncol = 1, rel_heights = c(1, 100)), ncol=1),
-            rel_widths=c(1, 0.55)))
-
-plot_all
-
-tiff(file = "Figures/Figure_4.tiff",   
-     width = 7.5, 
-     height = 5.7,
-     units = 'in',  
-     res = 300, 
-     compression = "lzw")
-print(plot_all)
-dev.off()
-
-
-############################################################
-# Sensitivity analysis for Non-PH Model, on Sigma prior.
-############################################################
-
-
-sensitivity_figure1_a <- base_results  %>%
-  filter(variable == "survival") %>%
-  filter(model == "NON-PH") %>%
-  filter(df == 6) %>%
-  filter(hrsd_rate == 10) %>% 
-  filter(datasets ==  "trial_and_all_maic") %>%
-  filter(t > 0) %>%
-  mutate(prior = paste0("'\u03c3~'*`G`*`amma`*`(`*", 
-                        2, "*`,`*" , 
-                        hsd_rate, "*`)`")) %>%
-  mutate(prior = factor(hsd_rate, labels = prior, levels = hsd_rate)) %>%
-  ggplot()+
-  theme_classic()+
-  theme(legend.position = "bottom",
-        legend.title = element_text(margin = margin(l = unit(4.0, 'cm'), r = unit(12.0, 'cm'))),
-        legend.key.spacing.x =  unit(0.3, 'cm'),
-        legend.box.spacing = unit(0, "inch"),
-        plot.margin = unit(c(0.1,0,0,0), "cm"),
-        legend.spacing = unit(c(0,0,0,0), "cm"),
-        legend.spacing.x = unit(0, "mm"),
-        legend.spacing.y = unit(0, "mm"))+
-  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-              alpha = 0.25, colour =  NA)+
-  geom_line(aes(x = t, y = median, colour = trt))+
-  geom_line(data = km_data_all %>% 
-              filter(dataset == "ALEX trial") %>% 
-              select(-c(dataset,model)),
-            aes(x = time, y = surv, colour = trt) )+
-  scale_colour_discrete("Treatment")+
-  scale_fill_discrete("Treatment")+
-  scale_y_continuous(limits = c(0,1),labels = scales::percent)+
-  ylab("Overall Survival")+
-  xlab("Time (years)")+
-  facet_wrap(~prior, ncol = 1, labeller = label_parsed)
-
-sensitivity_figure1_a
-
-sensitivity_figure1_b <- base_results  %>%
-  filter(variable == "hazard") %>%
-  filter(model == "NON-PH") %>%
-  filter(df == 6) %>%
-  filter(hrsd_rate == 10) %>%
-  filter(datasets ==  "trial_and_all_maic") %>%
-  filter(t > 0) %>%
-  mutate(prior = paste0("'\u03c3~'*`G`*`amma`*`(`*", 
-                        2, "*`,`*" , 
-                        hsd_rate, "*`)`")) %>%
-  mutate(prior = factor(hsd_rate, labels = prior, levels = hsd_rate)) %>%
-  ggplot()+
-  theme_classic()+
-  theme(legend.box = "horizontal",
-        legend.box.spacing = unit(0, "inch"),
-        legend.title = element_text(margin = margin(b = 0.1)),
-        plot.margin = unit(c(0.1,0,0,0), "cm"),
-        legend.spacing = unit(c(0,0,0,0), "cm"),
-        legend.spacing.x = unit(0, "mm"),
-        legend.spacing.y = unit(0, "mm"))+
-  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-              alpha = 0.25, colour =  NA)+
-  geom_line(aes(x = t, y = median, colour = trt))+
-  scale_colour_discrete("Treatment")+
-  scale_fill_discrete("Treatment")+
-  scale_y_continuous("Hazard", limits = c(0, 0.45))+
-  xlab("Time (years)")+
-  facet_wrap(~prior, ncol = 1, labeller = label_parsed)
-
-sensitivity_figure1_b
-
-plot_legend <- get_legend_35(sensitivity_figure1_a)
-
-sensitivity_figure1_no_legend <- plot_grid(
-  sensitivity_figure1_a +
-    theme(legend.position="none",
-          plot.title = element_text(hjust = -0.1,
-                                    vjust = -0.02,
-                                    size=14, face="bold"))+
-    labs(title = "(a)"),
-  NULL,
-  sensitivity_figure1_b+
-    theme(legend.position="none",
-          plot.title = element_text(hjust = -0.1,
-                                    vjust = -0.02,
-                                    size=14, face="bold"))+
-    labs(title = "(b)"), 
-  rel_widths = c(0.51,0.01, 0.5),
-  ncol = 3)
-
-sensitivity_figure1 <- plot_grid(sensitivity_figure1_no_legend,
-                                 NULL,
-                                 plot_legend, 
-                                 rel_heights = c(0.9,-0.01, 0.1),
-                                 ncol = 1)
-
-sensitivity_figure1
-
-tiff(file = "Figures/Sup_figure_7_sigma.tiff",   
-     width = 7.2, 
-     height = 6.0,
-     units = 'in',  
-     res = 300, 
-     compression = "lzw")
-print(sensitivity_figure1)
-dev.off()
-
-
-############################################################
-# Sensitivity analysis for Non-PH Model, on Tau prior.
-############################################################
-
-
-sensitivity_figure2_a <- base_results  %>%
-  filter(variable == "survival") %>%
-  filter(model == "NON-PH") %>%
-  filter(df == 6) %>%
-  filter(hsd_rate == 1) %>%
-  filter(datasets == "trial_and_all_maic") %>%
-  filter(t > 0) %>%
-  mutate(prior = paste0("'\u03C4~'*`G`*`amma`*`(`*", 
-                        2, "*`,`*" , 
-                        hrsd_rate, "*`)`")) %>%
-  mutate(prior = factor(hrsd_rate, labels = prior, levels = hrsd_rate)) %>%
-  ggplot()+
-  theme_classic()+
-  theme(legend.position = "bottom",
-        legend.title = element_text(margin = margin(l = unit(4.0, 'cm'), r = unit(12.0, 'cm'))),
-        legend.key.spacing.x =  unit(0.3, 'cm'),
-        legend.box.spacing = unit(0, "inch"),
-        plot.margin = unit(c(0.1,0,0,0), "cm"),
-        legend.spacing = unit(c(0,0,0,0), "cm"),
-        legend.spacing.x = unit(0, "mm"),
-        legend.spacing.y = unit(0, "mm"))+
-  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-              alpha = 0.25, colour =  NA)+
-  geom_line(aes(x = t, y = median, colour = trt))+
-  geom_line(data = km_data_all %>% 
-              filter(dataset == "ALEX trial") %>% 
-              select(-c(dataset,model)),
-            aes(x = time, y = surv, colour = trt) )+
-  scale_colour_discrete("Treatment")+
-  scale_fill_discrete("Treatment")+
-  scale_y_continuous(limits = c(0,1),labels = scales::percent)+
-  ylab("Overall Survival")+
-  xlab("Time (years)")+
-  facet_wrap(~prior, ncol = 1, labeller = label_parsed)
-
-sensitivity_figure2_a
-
-sensitivity_figure2_b <- base_results  %>%
-  filter(variable == "hazard") %>%
-  filter(model == "NON-PH") %>%
-  filter(df == 6) %>%
-  filter(hsd_rate == 1) %>%
-  filter(datasets == "trial_and_all_maic") %>%
-  filter(t > 0) %>%
-  mutate(prior = paste0("'\u03C4~'*`G`*`amma`*`(`*", 
-                        2, "*`,`*" , 
-                        hrsd_rate, "*`)`")) %>%
-  mutate(prior = factor(hrsd_rate, labels = prior, levels = hrsd_rate)) %>%
-  ggplot()+
-  theme_classic()+
-  theme(legend.box = "horizontal",
-        legend.box.spacing = unit(0, "inch"),
-        legend.title = element_text(margin = margin(b = 0.1)),
-        plot.margin = unit(c(0.1,0,0,0), "cm"),
-        legend.spacing = unit(c(0,0,0,0), "cm"),
-        legend.spacing.x = unit(0, "mm"),
-        legend.spacing.y = unit(0, "mm"))+
-  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-              alpha = 0.25, colour =  NA)+
-  geom_line(aes(x = t, y = median, colour = trt))+
-  scale_colour_discrete("Treatment")+
-  scale_fill_discrete("Treatment")+
-  scale_y_continuous("Hazard", limits = c(0, 0.45))+
-  xlab("Time (years)")+
-  facet_wrap(~prior, ncol = 1, labeller = label_parsed)
-
-sensitivity_figure2_b
-
-plot_legend <- get_legend_35(sensitivity_figure2_a)
-
-sensitivity_figure2_no_legend <- plot_grid(
-  sensitivity_figure2_a +
-    theme(legend.position="none",
-          plot.title = element_text(hjust = -0.1,
-                                    vjust = -0.02,
-                                    size=14, face="bold"))+
-    labs(title = "(a)"),
-  NULL,
-  sensitivity_figure2_b+
-    theme(legend.position="none",
-          plot.title = element_text(hjust = -0.1,
-                                    vjust = -0.02,
-                                    size=14, face="bold"))+
-    labs(title = "(b)"), 
-  rel_widths = c(0.51,0.01, 0.5),
-  ncol = 3)
-
-sensitivity_figure2 <- plot_grid(sensitivity_figure2_no_legend,
-                           NULL,
-                           plot_legend, 
-                           rel_heights = c(0.9,-0.01, 0.1),
-                           ncol = 1)
-
-sensitivity_figure2
-
-tiff(file = "Figures/Sup_figure_8_tau.tiff",   
-     width = 7.2, 
-     height = 6.0,
-     units = 'in',  
-     res = 300, 
-     compression = "lzw")
-print(sensitivity_figure2)
-dev.off()
-
-
-
-############################################################
-# Sensitivity analysis on knot positions.
-############################################################
-
-
-sensitivity_figure3_a <-   base_results  %>%
-  filter(variable == "survival") %>%
-  filter(model == "NON-PH") %>%
-  filter(datasets == "trial_and_all_maic") %>%
-  filter(hrsd_rate == 10) %>%
-  filter(hsd_rate == 1) %>%
-  filter(t > 0) %>%
-  mutate(df_model = paste0("df = ", df)) %>%
-  mutate(df_model = factor(df, levels = df, labels = df_model)) %>%
-  ggplot()+
-  theme_classic()+
-  theme(legend.position = "bottom",
-        legend.title = element_text(margin = margin(l = unit(4.0, 'cm'), r = unit(12.0, 'cm'))),
-        legend.key.spacing.x =  unit(0.3, 'cm'),
-        legend.box.spacing = unit(0, "inch"),
-        plot.margin = unit(c(0.1,0,0,0), "cm"),
-        legend.spacing = unit(c(0,0,0,0), "cm"),
-        legend.spacing.x = unit(0, "mm"),
-        legend.spacing.y = unit(0, "mm"))+
-  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-              alpha = 0.25, colour =  NA)+
-  geom_line(aes(x = t, y = median, colour = trt))+
-  geom_line(data = km_data_all %>% 
-              filter(dataset == "ALEX trial") %>% 
-              select(-c(dataset,model)),
-            aes(x = time, y = surv, colour = trt) )+
-  scale_colour_discrete("Treatment")+
-  scale_fill_discrete("Treatment")+
-  scale_y_continuous(limits = c(0,1),labels = scales::percent)+
-  ylab("Overall Survival")+
-  xlab("Time (years)")+
-  facet_wrap(~df_model, ncol = 1)
-
-sensitivity_figure3_a
-
-sensitivity_figure3_b <- base_results  %>%
-  filter(variable == "hazard") %>%
-  filter(model == "NON-PH") %>%
-  filter(datasets == "trial_and_all_maic") %>%
-  filter(hrsd_rate == 10) %>%
-  filter(hsd_rate == 1) %>%
-  filter(t > 0) %>%
-  mutate(df_model = paste0("df = ", df)) %>%
-  mutate(df_model = factor(df, levels = df, labels = df_model)) %>%
-  ggplot()+
-  theme_classic()+
-  theme(legend.box = "horizontal",
-        legend.box.spacing = unit(0, "inch"),
-        legend.title = element_text(margin = margin(b = 0.1)),
-        plot.margin = unit(c(0.1,0,0,0), "cm"),
-        legend.spacing = unit(c(0,0,0,0), "cm"),
-        legend.spacing.x = unit(0, "mm"),
-        legend.spacing.y = unit(0, "mm"))+
-  geom_ribbon(aes(x = t, y = median, ymin = lower, ymax = upper, colour = trt, fill = trt),
-              alpha = 0.25, colour =  NA)+
-  geom_line(aes(x = t, y = median, colour = trt))+
-  scale_colour_discrete("Treatment")+
-  scale_fill_discrete("Treatment")+
-  scale_y_continuous("Hazard", c(0, 0.45))+
-  xlab("Time (years)")+
-  facet_wrap(~df_model, ncol = 1)
-
-sensitivity_figure3_b
-
-plot_legend <- get_legend_35(sensitivity_figure3_a)
-
-sensitivity_figure3_no_legend <- plot_grid(
-  sensitivity_figure3_a +
-    theme(legend.position="none",
-          plot.title = element_text(hjust = -0.1,
-                                    vjust = -0.02,
-                                    size=14, face="bold"))+
-    labs(title = "(a)"),
-  NULL,
-  sensitivity_figure3_b+
-    theme(legend.position="none",
-          plot.title = element_text(hjust = -0.1,
-                                    vjust = -0.02,
-                                    size=14, face="bold"))+
-    labs(title = "(b)"), 
-  rel_widths = c(0.51,0.01, 0.5),
-  ncol = 3)
-
-sensitivity_figure3 <- plot_grid(sensitivity_figure3_no_legend,
-                                 NULL,
-                                 plot_legend, 
-                                 rel_heights = c(0.9,-0.01, 0.1),
-                                 ncol = 1)
-
-sensitivity_figure3
-
-tiff(file = "Figures/Sup_figure_9_df.tiff",   
-     width = 7.2, 
-     height = 6.0,
-     units = 'in',  
-     res = 300, 
-     compression = "lzw")
-print(sensitivity_figure3)
-dev.off()
-
-
-
-
